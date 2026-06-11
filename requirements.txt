@@ -1,0 +1,10 @@
+discord.py>=2.3.0
+anthropic>=0.40.0
+python-dotenv>=1.0.0
+aiohttp>=3.9.0
+beautifulsoup4>=4.12.0
+tzdata>=2024.1  # Windows には OS の tz データベースが無いため必須
+
+# スプレッドシート連携（後で有効化）
+gspread>=6.0.0
+google-auth>=2.27.0
