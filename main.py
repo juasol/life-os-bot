@@ -325,12 +325,56 @@ def _is_junk_task(t: str) -> bool:
     }
 
 
+def _parse_leading_date(text: str):
+    """メッセージ先頭の日付を解釈し (date, 残り本文) を返す。日付が無ければ (None, text)。
+
+    対応: "YYYY-MM-DD" / "YYYY/MM/DD" / "M/D" / "M月D日"（先頭のみ）。
+    年を省略した場合は当年。ただし当年だと未来日になる場合は前年とみなす。
+    """
+    t = (text or "").lstrip()
+
+    # 年あり: YYYY-MM-DD / YYYY/MM/DD
+    m = re.match(r"^(\d{4})[-/](\d{1,2})[-/](\d{1,2})[ \t　]*(.*)$", t, re.DOTALL)
+    if m:
+        try:
+            d = date(int(m[1]), int(m[2]), int(m[3]))
+        except ValueError:
+            return None, text
+        rest = m[4].strip()
+        return (d, rest) if rest else (None, text)
+
+    # 年なし: M/D または M月D日
+    m = re.match(r"^(\d{1,2})[/月](\d{1,2})日?[ \t　]*(.*)$", t, re.DOTALL)
+    if m:
+        today = datetime.now(JST).date()
+        try:
+            d = date(today.year, int(m[1]), int(m[2]))
+        except ValueError:
+            return None, text
+        if d > today:  # 当年だと未来 → 前年の同日とみなす
+            try:
+                d = date(today.year - 1, int(m[1]), int(m[2]))
+            except ValueError:
+                return None, text
+        rest = m[3].strip()
+        return (d, rest) if rest else (None, text)
+
+    return None, text
+
+
 async def handle_review(message: discord.Message):
-    text = message.content.strip()
-    if not text:
+    raw = message.content.strip()
+    if not raw:
         return
+
+    # 先頭に日付があれば、その日付の振り返りとして記録（例: "6/18 ..." / "2026-06-15 ..."）
+    entry_date, text = _parse_leading_date(raw)
+    if not text:  # 日付だけで本文が無い場合は通常扱い
+        entry_date, text = None, raw
+
+    when = datetime(entry_date.year, entry_date.month, entry_date.day) if entry_date else None
     # 日記として記録
-    sheets.add_diary(text)
+    sheets.add_diary(text, when=when)
 
     # 明日のタスクに相当する内容を抽出 → バックログ（実行予定日なし）で追加
     extracted = await claude_text(
@@ -347,18 +391,23 @@ async def handle_review(message: discord.Message):
             if t and not _is_junk_task(t):
                 sheets.add_task(t)  # scheduled_date なし＝バックログ
 
+    # 記録の確認メッセージ（過去日付ならその日付を明示）
+    confirm = (f"📅 {entry_date.strftime('%Y-%m-%d')} の振り返りとして記録しました。"
+               if entry_date else "記録しました")
+
     # バックログを取得し、明日やるものを番号で選んでもらう
     backlog = sheets.get_backlog_tasks()
     if backlog:
         body = "\n".join(f"{i + 1}. {b['content']}" for i, b in enumerate(backlog))
         reply_text = (
+            f"{confirm}\n\n"
             f"📋 バックログに {len(backlog)} 件あります：\n"
             f"{body}\n\n"
             "明日やるものを番号で返信してください（例: 1,2）\n"
             "なければ「なし」と返信してください。"
         )
     else:
-        reply_text = "記録しました"
+        reply_text = confirm
 
     # note記事・Xポスト生成の案内を末尾に付ける
     reply_text += (
