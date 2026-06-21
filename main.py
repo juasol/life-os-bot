@@ -316,6 +316,15 @@ def _parse_weight(text: str) -> float | None:
     return None
 
 
+def _is_junk_task(t: str) -> bool:
+    """Claude が「タスクなし」の意味で返すプレースホルダー文字列かを判定する。"""
+    norm = (t or "").strip().strip("（）()【】[]「」『』 　").strip().lower()
+    return norm in {
+        "", "なし", "無し", "空行", "タスクなし", "特になし", "特に無し",
+        "none", "n/a", "na", "-",
+    }
+
+
 async def handle_review(message: discord.Message):
     text = message.content.strip()
     if not text:
@@ -326,14 +335,17 @@ async def handle_review(message: discord.Message):
     # 明日のタスクに相当する内容を抽出 → バックログ（実行予定日なし）で追加
     extracted = await claude_text(
         f"以下は今日の振り返りの文章です。この中から『明日やるべきタスク』に相当する"
-        f"具体的な行動だけを抽出してください。タスクが複数あれば1行に1つずつ、"
-        f"タスクが無ければ空行のみを返してください。前置きや説明は不要です。\n\n"
+        f"具体的な行動だけを抽出してください。タスクが複数あれば1行に1つずつ。"
+        f"タスクが1つも無ければ、何も書かず NONE とだけ返してください。"
+        f"『空行』『タスクなし』などのプレースホルダー文字は絶対に書かないでください。"
+        f"前置きや説明も不要です。\n\n"
         f"---\n{text}\n---",
     )
-    for line in extracted.splitlines():
-        t = line.strip().lstrip("・-*0123456789. ").strip()
-        if t:
-            sheets.add_task(t)  # scheduled_date なし＝バックログ
+    if extracted.strip().upper() != "NONE":
+        for line in extracted.splitlines():
+            t = line.strip().lstrip("・-*0123456789.)　 ").strip()
+            if t and not _is_junk_task(t):
+                sheets.add_task(t)  # scheduled_date なし＝バックログ
 
     # バックログを取得し、明日やるものを番号で選んでもらう
     backlog = sheets.get_backlog_tasks()
