@@ -1030,6 +1030,14 @@ async def on_ready():
         monthly_report_post.start()
 
 
+def _looks_like_selection(text: str) -> bool:
+    """振り返りの番号選択っぽい入力か判定する（数字＋区切り、または「なし」系）。"""
+    t = (text or "").strip()
+    if t in ("なし", "ナシ", "無し", "0"):
+        return True
+    return bool(re.fullmatch(r"[\d,\s、，]+", t))
+
+
 @client.event
 async def on_message(message: discord.Message):
     # BOT 自身（や他の BOT）のメッセージは無視
@@ -1046,9 +1054,14 @@ async def on_message(message: discord.Message):
         return
 
     try:
-        # 振り返りチャンネル: タスク選択待ちなら選択処理、なければ通常の振り返り
+        # 振り返りチャンネル: 番号入力待ちでも、入力が「選択っぽい」ときだけ選択処理に回す。
+        # 普通の文章なら待ち状態を解除して通常の振り返りとして扱う（番号と誤認しない）。
         if handler is handle_review and message.channel.id in pending_task_selections:
-            await handle_task_selection(message)
+            if _looks_like_selection(message.content):
+                await handle_task_selection(message)
+            else:
+                pending_task_selections.pop(message.channel.id, None)
+                await handle_review(message)
         else:
             await handler(message)
     except Exception as e:  # noqa: BLE001
