@@ -54,6 +54,7 @@ CH_IDEA = os.environ.get("CHANNEL_IDEA", "アイデア")
 CH_ARTICLE = os.environ.get("CHANNEL_ARTICLE", "気になる記事")
 CH_ASSISTANT = os.environ.get("CHANNEL_ASSISTANT", "AI秘書")
 CH_REPORT = os.environ.get("CHANNEL_REPORT", "レポート")
+CH_PROFILE = os.environ.get("CHANNEL_PROFILE", "プロフィール")
 
 # BOT が自動で話しかけるチャンネル（ユーザー入力を処理する／しないは別途分岐）
 AUTO_POST_CHANNELS = {CH_WEIGHT, CH_TODO, CH_REVIEW}
@@ -229,7 +230,7 @@ async def morning_post():
         "yesterday_diary": yesterday_diary,
         "yesterday_articles": yesterday_articles,
     }
-    greeting = await generate_morning_greeting(tasks_list, context)
+    greeting = await generate_morning_greeting(tasks_list, context, profile=_profile_cache)
 
     # 5) 今日やることチャンネルに送信
     for ch in find_channels_by_name(CH_TODO):
@@ -800,10 +801,13 @@ def _run_secretary_tool(name: str, inp: dict) -> str:
 
 
 async def answer_secretary_question(question: str, image_bytes: bytes | None = None,
-                                    media_type: str = "image/jpeg") -> str:
+                                    media_type: str = "image/jpeg", profile: str = "") -> str:
     """tool use 対応の AI秘書。スプレッドシートを参照・編集しながら回答する。"""
     if claude is None:
         return "（ANTHROPIC_API_KEY が未設定のため回答できません）"
+
+    # プロフィールがあればシステムプロンプト冒頭に注入
+    system_prompt = _profile_prefix(profile) + SECRETARY_SYSTEM
 
     # コンテキストデータ（各シートのダンプ＋アイデア一覧）
     context = sheets.dump_for_assistant()
@@ -834,7 +838,7 @@ async def answer_secretary_question(question: str, image_bytes: bytes | None = N
         resp = await claude.messages.create(
             model=CLAUDE_MODEL,
             max_tokens=2048,
-            system=SECRETARY_SYSTEM,
+            system=system_prompt,
             tools=SECRETARY_TOOLS,
             messages=messages,
         )
@@ -874,6 +878,7 @@ async def handle_secretary(message: discord.Message):
         async with message.channel.typing():
             answer = await answer_secretary_question(
                 question, image_bytes=image_bytes, media_type=media_type,
+                profile=_profile_cache,
             )
         # Discord の2000字制限に配慮して必要なら切り詰める
         if len(answer) > 1990:
@@ -884,10 +889,31 @@ async def handle_secretary(message: discord.Message):
         await message.reply(f"処理中にエラーが発生しました：{e}")
 
 
+async def handle_profile(message: discord.Message):
+    global _profile_cache
+    content = message.content.strip()
+    if not content:
+        return
+    _profile_cache = content
+    await message.reply("✅ プロフィールを更新しました！次回から全機能に反映されます。")
+
+
+# ---------------------------------------------------------------------------
+# プロフィール注入用ヘルパー
+# ---------------------------------------------------------------------------
+def _profile_prefix(profile: str) -> str:
+    """プロンプト冒頭に差し込むプロフィールブロックを返す（空なら空文字）。"""
+    p = (profile or "").strip()
+    if not p:
+        return ""
+    return f"# ユーザーのプロフィール（以下を踏まえて応答してください）\n{p}\n\n"
+
+
 # ---------------------------------------------------------------------------
 # 月末レポート
 # ---------------------------------------------------------------------------
-async def generate_monthly_report(current: dict, prev: dict, year: int, month: int) -> str:
+async def generate_monthly_report(current: dict, prev: dict, year: int, month: int,
+                                  profile: str = "") -> str:
     """当月／前月のデータから統計テキストを組み立て、Claude のコメントを添えて返す。
 
     current / prev のキー: expense, ideas, articles, tasks_done, first_weight, last_weight
@@ -912,7 +938,8 @@ async def generate_monthly_report(current: dict, prev: dict, year: int, month: i
     stats = "\n".join(lines)
 
     comment = await claude_text(
-        "次は個人の月次活動サマリーです。データを踏まえて、ねぎらいと前向きな気づきを"
+        _profile_prefix(profile)
+        + "次は個人の月次活動サマリーです。データを踏まえて、ねぎらいと前向きな気づきを"
         "2〜3行の日本語コメントにしてください。前置きや見出しは不要です。\n\n" + stats,
     )
     return f"📊 **{year}年{month}月のレポート**\n\n{stats}\n\n{comment}"
@@ -934,7 +961,7 @@ async def generate_period_analysis(entries: list[dict], start_str: str, end_str:
     )
 
 
-async def generate_morning_greeting(tasks: list[str], context: dict) -> str:
+async def generate_morning_greeting(tasks: list[str], context: dict, profile: str = "") -> str:
     """朝の通知をパーソナライズして生成する。
 
     context: weight_change(float|None) / yesterday_diary(str|None) / yesterday_articles(int)
@@ -959,7 +986,8 @@ async def generate_morning_greeting(tasks: list[str], context: dict) -> str:
     task_text = "\n".join(f"- {t}" for t in tasks) if tasks else "（タスクなし）"
 
     return await claude_text(
-        "次の情報をもとに、朝の通知メッセージを作ってください。\n"
+        _profile_prefix(profile)
+        + "次の情報をもとに、朝の通知メッセージを作ってください。\n"
         "条件:\n"
         "・「おはようございます。」で始める\n"
         "・体重変化や昨日の実績があれば1〜2文で自然に触れる（無い情報には触れない）\n"
@@ -972,12 +1000,13 @@ async def generate_morning_greeting(tasks: list[str], context: dict) -> str:
     )
 
 
-async def generate_note_article(diary_content: str) -> str:
+async def generate_note_article(diary_content: str, profile: str = "") -> str:
     """振り返り日記をもとに note に投稿できる記事を生成する。"""
     if claude is None:
         return "（ANTHROPIC_API_KEY が未設定のため生成できません）"
     return await claude_text(
-        "以下は個人の振り返り日記です。これをもとに note に投稿できる記事を書いてください。\n"
+        _profile_prefix(profile)
+        + "以下は個人の振り返り日記です。これをもとに note に投稿できる記事を書いてください。\n"
         "条件:\n"
         "・冒頭に「# タイトル」形式でタイトルを付ける\n"
         "・800〜1200字程度\n"
@@ -988,12 +1017,13 @@ async def generate_note_article(diary_content: str) -> str:
     )
 
 
-async def generate_x_posts(diary_content: str) -> str:
+async def generate_x_posts(diary_content: str, profile: str = "") -> str:
     """振り返り日記をもとに X のポスト案を3つ生成する。"""
     if claude is None:
         return "（ANTHROPIC_API_KEY が未設定のため生成できません）"
     return await claude_text(
-        "以下は個人の振り返り日記です。これをもとに X（旧Twitter）のポスト案を3つ作ってください。\n"
+        _profile_prefix(profile)
+        + "以下は個人の振り返り日記です。これをもとに X（旧Twitter）のポスト案を3つ作ってください。\n"
         "条件:\n"
         "・各投稿は140字以内\n"
         "・気づき・学び・面白い視点を短くまとめる\n"
@@ -1037,7 +1067,7 @@ async def send_monthly_report(year: int, month: int) -> None:
     prev_year, prev_month = (year - 1, 12) if month == 1 else (year, month - 1)
     prev = _collect_month_stats(prev_year, prev_month)
 
-    report = await generate_monthly_report(current, prev, year, month)
+    report = await generate_monthly_report(current, prev, year, month, profile=_profile_cache)
     for ch in find_channels_by_name(CH_REPORT):
         await ch.send(report)
 
@@ -1053,6 +1083,7 @@ HANDLERS = {
         CH_IDEA: handle_idea,
         CH_ARTICLE: handle_article,
         CH_ASSISTANT: handle_secretary,
+        CH_PROFILE: handle_profile,
         # CH_TODO はユーザー入力不要なのでハンドラなし
     }.items()
 }
@@ -1079,10 +1110,32 @@ X_EMOJI = "🐦"
 # 当日に実行済みの定期通知キー（"morning-2026-06-11" など）。重複送信を防ぐ。
 _fired_today: set[str] = set()
 
+# 「プロフィール」チャンネルの最新内容（全機能のプロンプトに注入する）
+_profile_cache: str = ""
+
+
+async def load_profile() -> None:
+    """「プロフィール」チャンネルの最新メッセージ（BOT以外）を _profile_cache に読み込む。"""
+    global _profile_cache
+    channels = find_channels_by_name(CH_PROFILE)
+    if not channels:
+        return
+    try:
+        async for msg in channels[0].history(limit=50):
+            if client.user and msg.author.id == client.user.id:
+                continue  # BOT自身の確認返信は無視
+            if msg.content.strip():
+                _profile_cache = msg.content.strip()
+                logger.info("プロフィールを読み込みました（%d文字）", len(_profile_cache))
+                return
+    except Exception as e:  # noqa: BLE001
+        logger.exception("プロフィールの読み込みに失敗: %s", e)
+
 
 @client.event
 async def on_ready():
     logger.info("ログインしました: %s (id=%s)", client.user, client.user.id)
+    await load_profile()
     if not morning_post.is_running():
         morning_post.start()
     if not night_post.is_running():
@@ -1170,10 +1223,10 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
             async with channel.typing():
                 if emoji == NOTE_EMOJI:
                     header = "📝 **note記事案**\n\n"
-                    content = await generate_note_article(diary)
+                    content = await generate_note_article(diary, profile=_profile_cache)
                 else:
                     header = "🐦 **Xポスト案**\n\n"
-                    content = await generate_x_posts(diary)
+                    content = await generate_x_posts(diary, profile=_profile_cache)
             for chunk in _split_message(header + content, 1900):
                 await channel.send(chunk)
         except Exception as e:  # noqa: BLE001
