@@ -38,6 +38,7 @@ WS_DIARY = "日記"
 WS_TASK = "タスク"
 WS_IDEA = "アイデア"
 WS_ARTICLE = "記事"
+WS_HABIT = "習慣"
 
 # ワークシート名 → ヘッダー行
 WORKSHEETS: dict[str, list[str]] = {
@@ -47,6 +48,7 @@ WORKSHEETS: dict[str, list[str]] = {
     WS_TASK: ["日付", "内容", "完了", "実行予定日"],
     WS_IDEA: ["日付", "タイトル", "カテゴリ", "内容"],
     WS_ARTICLE: ["日付", "URL", "要約"],
+    WS_HABIT: ["日付", "習慣"],
 }
 
 # 「完了」とみなす値
@@ -469,6 +471,25 @@ def get_recent_diary(limit: int = 30) -> list[dict]:
 def get_recent_ideas(limit: int = 20) -> list[dict]:
     """アイデアの直近データを返す（日付・タイトル・カテゴリ・内容、日付昇順）。"""
     return _get_recent(WS_IDEA, limit)
+
+
+# ---------------------------------------------------------------------------
+# 習慣シート
+# ---------------------------------------------------------------------------
+def record_habit(habit: str, when: Optional[datetime] = None) -> None:
+    """習慣シートに日付と習慣名を記録する。"""
+    if not _append(WS_HABIT, [_date(when), habit]):
+        logger.info("[STUB] 習慣を記録: %s", habit)
+
+
+def get_habit_stats(start: date, end: date) -> dict[str, int]:
+    """期間内の習慣ごとの達成回数を集計して返す。例: {"筋トレ": 5, "読書": 3}"""
+    stats: dict[str, int] = {}
+    for row in _rows_by_period(WS_HABIT, start, end):
+        habit = row[1].strip() if len(row) > 1 else ""
+        if habit:
+            stats[habit] = stats.get(habit, 0) + 1
+    return stats
 
 
 # ---------------------------------------------------------------------------

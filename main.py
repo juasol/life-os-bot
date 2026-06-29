@@ -55,6 +55,7 @@ CH_ARTICLE = os.environ.get("CHANNEL_ARTICLE", "気になる記事")
 CH_ASSISTANT = os.environ.get("CHANNEL_ASSISTANT", "AI秘書")
 CH_REPORT = os.environ.get("CHANNEL_REPORT", "レポート")
 CH_PROFILE = os.environ.get("CHANNEL_PROFILE", "プロフィール")
+CH_HABIT = os.environ.get("CHANNEL_HABIT", "習慣")
 
 # BOT が自動で話しかけるチャンネル（ユーザー入力を処理する／しないは別途分岐）
 AUTO_POST_CHANNELS = {CH_WEIGHT, CH_TODO, CH_REVIEW}
@@ -264,9 +265,28 @@ async def monthly_report_post():
     await send_monthly_report(now.year, now.month)
 
 
+@tasks.loop(time=time(hour=21, minute=0, tzinfo=JST))
+async def weekly_habit_report_post():
+    # 毎日21時に起動し、日曜日のときだけ直近7日間の習慣レポートを送る
+    now = datetime.now(JST)
+    if now.weekday() != 6:  # 0=月 ... 6=日
+        return
+    key = f"habit-{now.strftime('%Y-%m-%d')}"
+    if key in _fired_today:
+        return
+    _fired_today.add(key)
+    logger.info("週次の習慣レポートを実行")
+    start = (now - timedelta(days=6)).date()  # 今日を含む直近7日間
+    stats = sheets.get_habit_stats(start, now.date())
+    report = await generate_habit_report(stats, "直近7日間", 7)
+    for ch in find_channels_by_name(CH_HABIT):
+        await ch.send(report)
+
+
 @morning_post.before_loop
 @night_post.before_loop
 @monthly_report_post.before_loop
+@weekly_habit_report_post.before_loop
 async def _before_scheduled():
     await client.wait_until_ready()
 
@@ -898,6 +918,18 @@ async def handle_profile(message: discord.Message):
     await message.reply("✅ プロフィールを更新しました！次回から全機能に反映されます。")
 
 
+async def handle_habit(message: discord.Message):
+    text = message.content.strip()
+    if not text:
+        return
+    habit = await extract_habit(text)
+    if not habit:
+        await message.reply("習慣の名前を読み取れませんでした。もう一度送ってください。")
+        return
+    sheets.record_habit(habit)
+    await message.reply(f"✅ {habit} を記録しました！")
+
+
 # ---------------------------------------------------------------------------
 # プロフィール注入用ヘルパー
 # ---------------------------------------------------------------------------
@@ -1034,6 +1066,44 @@ async def generate_x_posts(diary_content: str, profile: str = "") -> str:
     )
 
 
+async def extract_habit(text: str) -> str:
+    """メッセージから習慣名を抽出し、10文字以内の名詞形で返す。例:「筋トレした」→「筋トレ」"""
+    t = (text or "").strip()
+    if not t:
+        return ""
+    if claude is None:
+        return t[:10]
+    result = await claude_text(
+        "次のメッセージから習慣の名前を抽出し、10文字以内の名詞形で返してください。"
+        "余計な語・記号・説明は付けず、習慣名のみを返すこと。例:「筋トレした」→「筋トレ」\n\n"
+        f"メッセージ: {t}",
+        max_tokens=50,
+    )
+    name = result.strip().splitlines()[0].strip() if result.strip() else ""
+    return (name or t)[:10]
+
+
+async def generate_habit_report(stats: dict[str, int], period: str, days: int) -> str:
+    """習慣の達成状況からレポート文を生成する。habit が無ければ定型文を返す。"""
+    if not stats:
+        return "記録はまだありません。"
+
+    lines = []
+    for habit, count in sorted(stats.items(), key=lambda x: x[1], reverse=True):
+        rate = count / days * 100 if days else 0
+        lines.append(f"・{habit}：{count}回（達成率 {rate:.0f}%）")
+    body = "\n".join(lines)
+
+    if claude is None:
+        return f"📊 習慣レポート（{period}）\n\n{body}"
+
+    comment = await claude_text(
+        "次は習慣トラッカーの集計結果です。継続をねぎらい、前向きな気づきを"
+        "2〜3行の日本語コメントにしてください。前置きや見出しは不要です。\n\n" + body,
+    )
+    return f"📊 習慣レポート（{period}）\n\n{body}\n\n{comment}"
+
+
 def _split_message(text: str, limit: int = 1900) -> list[str]:
     """Discord の文字数制限を超えないよう、text を limit 字ずつに分割する。"""
     chunks = []
@@ -1084,6 +1154,7 @@ HANDLERS = {
         CH_ARTICLE: handle_article,
         CH_ASSISTANT: handle_secretary,
         CH_PROFILE: handle_profile,
+        CH_HABIT: handle_habit,
         # CH_TODO はユーザー入力不要なのでハンドラなし
     }.items()
 }
@@ -1142,6 +1213,8 @@ async def on_ready():
         night_post.start()
     if not monthly_report_post.is_running():
         monthly_report_post.start()
+    if not weekly_habit_report_post.is_running():
+        weekly_habit_report_post.start()
 
 
 def _looks_like_selection(text: str) -> bool:
