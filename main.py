@@ -821,8 +821,12 @@ def _run_secretary_tool(name: str, inp: dict) -> str:
 
 
 async def answer_secretary_question(question: str, image_bytes: bytes | None = None,
-                                    media_type: str = "image/jpeg", profile: str = "") -> str:
-    """tool use 対応の AI秘書。スプレッドシートを参照・編集しながら回答する。"""
+                                    media_type: str = "image/jpeg", profile: str = "",
+                                    history: list[dict] | None = None) -> str:
+    """tool use 対応の AI秘書。スプレッドシートを参照・編集しながら回答する。
+
+    history: 直前までの会話（[{"role", "content"}, ...] のテキスト往復）。文脈を引き継ぐ。
+    """
     if claude is None:
         return "（ANTHROPIC_API_KEY が未設定のため回答できません）"
 
@@ -852,7 +856,9 @@ async def answer_secretary_question(question: str, image_bytes: bytes | None = N
         ),
     })
 
-    messages: list[dict] = [{"role": "user", "content": user_content}]
+    # 過去の会話履歴（テキスト往復）を先頭に付けて文脈を引き継ぐ
+    messages: list[dict] = list(history or [])
+    messages.append({"role": "user", "content": user_content})
 
     for _ in range(8):  # ツール往復の上限
         resp = await claude.messages.create(
@@ -883,6 +889,13 @@ async def answer_secretary_question(question: str, image_bytes: bytes | None = N
 
 async def handle_secretary(message: discord.Message):
     question = message.content.strip()
+    cid = message.channel.id
+
+    # 会話をリセットするキーワード
+    if question in ("リセット", "reset", "クリア", "新しい会話"):
+        _secretary_history.pop(cid, None)
+        await message.reply("🔄 会話履歴をリセットしました。新しい会話を始めます。")
+        return
 
     image_bytes = None
     media_type = "image/jpeg"
@@ -894,16 +907,22 @@ async def handle_secretary(message: discord.Message):
     if not question and image_bytes is None:
         return
 
+    history = _secretary_history.get(cid, [])
     try:
         async with message.channel.typing():
             answer = await answer_secretary_question(
                 question, image_bytes=image_bytes, media_type=media_type,
-                profile=_profile_cache,
+                profile=_profile_cache, history=history,
             )
-        # Discord の2000字制限に配慮して必要なら切り詰める
-        if len(answer) > 1990:
-            answer = answer[:1990] + "…"
-        await message.reply(answer or "（回答が空でした）")
+        # 会話履歴を更新（フル回答を保存。直近 MAX_SECRETARY_TURNS 往復に制限）
+        _secretary_history[cid] = (history + [
+            {"role": "user", "content": question or "（画像を送信）"},
+            {"role": "assistant", "content": answer},
+        ])[-MAX_SECRETARY_TURNS * 2:]
+
+        # Discord の2000字制限に配慮して表示だけ切り詰める
+        display = answer if len(answer) <= 1990 else answer[:1990] + "…"
+        await message.reply(display or "（回答が空でした）")
     except Exception as e:  # noqa: BLE001
         logger.exception("AI秘書でエラー: %s", e)
         await message.reply(f"処理中にエラーが発生しました：{e}")
@@ -1183,6 +1202,11 @@ _fired_today: set[str] = set()
 
 # 「プロフィール」チャンネルの最新内容（全機能のプロンプトに注入する）
 _profile_cache: str = ""
+
+# AI秘書チャンネルID → 会話履歴（[{"role", "content"}, ...]）。文脈を引き継ぐ。
+# メモリ保持のため BOT 再起動でリセット。直近 MAX_SECRETARY_TURNS 往復を保持。
+_secretary_history: dict[int, list[dict]] = {}
+MAX_SECRETARY_TURNS = 10
 
 
 async def load_profile() -> None:
