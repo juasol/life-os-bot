@@ -37,8 +37,11 @@ DISCORD_TOKEN = os.environ.get("DISCORD_TOKEN")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
 GOOGLE_SHEET_ID = os.environ.get("GOOGLE_SHEET_ID")  # シート連携実装後に使用
 
-# Claude モデル（用途に応じて使い分け可能）
-CLAUDE_MODEL = "claude-sonnet-4-6"
+# Claude モデル（用途に応じて使い分け。コスト節約のため単純処理は FAST=Haiku）
+#   FAST  : Haiku 4.5   ($1/$5 per 1M)  … 抽出・分類・短文生成
+#   SMART : Sonnet 4.6  ($3/$15 per 1M) … 品質重視の文章・複雑な推論・tool use
+MODEL_FAST = os.environ.get("CLAUDE_MODEL_FAST", "claude-haiku-4-5")
+MODEL_SMART = os.environ.get("CLAUDE_MODEL_SMART", "claude-sonnet-4-6")
 
 JST = ZoneInfo("Asia/Tokyo")
 
@@ -116,12 +119,13 @@ async def download_attachment(attachment: discord.Attachment) -> tuple[bytes, st
     return data, media_type
 
 
-async def claude_text(prompt: str, system: str | None = None, max_tokens: int = 1024) -> str:
-    """Claude にテキストプロンプトを投げて返答テキストを得る。"""
+async def claude_text(prompt: str, system: str | None = None, max_tokens: int = 1024,
+                      model: str | None = None) -> str:
+    """Claude にテキストプロンプトを投げて返答テキストを得る。model 未指定なら FAST。"""
     if claude is None:
         return "（ANTHROPIC_API_KEY が未設定のため Claude を呼び出せません）"
     kwargs = {
-        "model": CLAUDE_MODEL,
+        "model": model or MODEL_FAST,
         "max_tokens": max_tokens,
         "messages": [{"role": "user", "content": prompt}],
     }
@@ -132,13 +136,13 @@ async def claude_text(prompt: str, system: str | None = None, max_tokens: int = 
 
 
 async def claude_vision(image_bytes: bytes, media_type: str, prompt: str,
-                        max_tokens: int = 1024) -> str:
-    """画像 + プロンプトを Claude に投げて返答テキストを得る。"""
+                        max_tokens: int = 1024, model: str | None = None) -> str:
+    """画像 + プロンプトを Claude に投げて返答テキストを得る。model 未指定なら FAST。"""
     if claude is None:
         return "（ANTHROPIC_API_KEY が未設定のため Claude を呼び出せません）"
     b64 = base64.standard_b64encode(image_bytes).decode("ascii")
     resp = await claude.messages.create(
-        model=CLAUDE_MODEL,
+        model=model or MODEL_FAST,
         max_tokens=max_tokens,
         messages=[{
             "role": "user",
@@ -587,6 +591,7 @@ async def handle_article(message: discord.Message):
     summary = await claude_text(
         f"次の記事を日本語で3〜5行に要約してください。要点を箇条書きで。\n\n"
         f"タイトル: {title}\n\n本文:\n{page_text[:6000]}",
+        model=MODEL_SMART,
     )
     sheets.add_article(url, summary)
     await message.reply(f"【{title}】\n{summary}")
@@ -870,7 +875,7 @@ async def answer_secretary_question(question: str, image_bytes: bytes | None = N
 
     for _ in range(8):  # ツール往復の上限
         resp = await claude.messages.create(
-            model=CLAUDE_MODEL,
+            model=MODEL_SMART,
             max_tokens=2048,
             system=system_prompt,
             tools=SECRETARY_TOOLS,
@@ -1108,6 +1113,7 @@ async def generate_period_analysis(entries: list[dict], start_str: str, end_str:
         "【AI分析】\n（2〜3行）\n\n"
         f"---\n{body}\n---",
         max_tokens=2048,
+        model=MODEL_SMART,
     )
 
 
@@ -1164,6 +1170,7 @@ async def generate_note_article(diary_content: str, profile: str = "") -> str:
         "・体験や気づきを、読者が共感・活用できる形に昇華する\n\n"
         f"---\n{diary_content}\n---",
         max_tokens=2048,
+        model=MODEL_SMART,
     )
 
 
@@ -1181,6 +1188,7 @@ async def generate_x_posts(diary_content: str, profile: str = "") -> str:
         "・1. 2. 3. と番号付きで3案\n\n"
         f"---\n{diary_content}\n---",
         max_tokens=1024,
+        model=MODEL_SMART,
     )
 
 
