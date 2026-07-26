@@ -396,6 +396,7 @@ def _parse_leading_date(text: str):
 
 
 async def handle_review(message: discord.Message):
+    """通常モードの振り返り：送られた文章をそのまま記録して締める。"""
     raw = message.content.strip()
     if not raw:
         return
@@ -405,6 +406,14 @@ async def handle_review(message: discord.Message):
     if not text:  # 日付だけで本文が無い場合は通常扱い
         entry_date, text = None, raw
 
+    await _finalize_review(message, text, entry_date)
+
+
+async def _finalize_review(message: discord.Message, text: str, entry_date=None):
+    """日記記録 → タスク抽出 → バックログ提示 → note/X案内、をまとめて行う。
+
+    通常モード・対話モードの両方から呼ばれる共通の締め処理。
+    """
     when = datetime(entry_date.year, entry_date.month, entry_date.day) if entry_date else None
     # 日記として記録
     sheets.add_diary(text, when=when)
@@ -459,6 +468,135 @@ async def handle_review(message: discord.Message):
             await sent.add_reaction(emoji)
         except discord.HTTPException as e:
             logger.warning("リアクション付与に失敗: %s", e)
+
+
+# ---------------------------------------------------------------------------
+# 振り返り：対話（ヒアリング）モード
+# ---------------------------------------------------------------------------
+REVIEW_DIALOG_SYSTEM = (
+    "あなたは1日の振り返りをやさしく聞き出すインタビュアーです。"
+    "ユーザーの1日について、共感しながら1回につき1つだけ短い質問を返してください。"
+    "気分・出来事・学び・明日やりたいこと などを自然に引き出します。"
+    "2〜4往復して十分に聞けたと判断したら、それ以上質問せず、1行目に必ず [[まとめ]] とだけ書き、"
+    "続けて会話全体を一人称の自然な日記としてまとめてください。前置きや説明は不要です。"
+)
+MAX_REVIEW_DIALOG_TURNS = 6
+
+
+async def _claude_chat(system: str, messages: list[dict], model: str | None = None,
+                       max_tokens: int = 1024) -> str:
+    """会話履歴つきで Claude を呼び、返答テキストを得る。"""
+    if claude is None:
+        return ""
+    resp = await claude.messages.create(
+        model=model or MODEL_FAST, max_tokens=max_tokens,
+        system=system, messages=messages,
+    )
+    return "".join(b.text for b in resp.content if b.type == "text").strip()
+
+
+async def start_review_dialog(message: discord.Message):
+    text = message.content.strip()
+    if not text:
+        return
+    if claude is None:  # APIが無ければ対話できないので通常処理
+        await handle_review(message)
+        return
+    _review_dialogs[message.channel.id] = [{"role": "user", "content": text}]
+    await _run_review_dialog_turn(message)
+
+
+async def continue_review_dialog(message: discord.Message):
+    hist = _review_dialogs.get(message.channel.id)
+    if hist is None:
+        await handle_review(message)
+        return
+    hist.append({"role": "user", "content": message.content.strip()})
+    await _run_review_dialog_turn(message)
+
+
+async def _run_review_dialog_turn(message: discord.Message):
+    cid = message.channel.id
+    hist = _review_dialogs.get(cid, [])
+    user_turns = sum(1 for m in hist if m["role"] == "user")
+
+    async with message.channel.typing():
+        # 長引いたら会話全体を日記化して自動で締める
+        if user_turns >= MAX_REVIEW_DIALOG_TURNS:
+            transcript = "\n".join(
+                f'{"あなた" if m["role"] == "user" else "AI"}: {m["content"]}' for m in hist
+            )
+            diary = await claude_text(
+                "次の振り返り会話を、一人称の自然な日記にまとめてください。前置きは不要です。\n\n"
+                + transcript,
+                model=MODEL_SMART, max_tokens=1024,
+            )
+            _review_dialogs.pop(cid, None)
+            await _finalize_review(message, diary or transcript)
+            return
+
+        resp_text = await _claude_chat(REVIEW_DIALOG_SYSTEM, hist, model=MODEL_SMART, max_tokens=1024)
+
+    if "[[まとめ]]" in resp_text:
+        # AIが締めると判断 → 日記を確定
+        diary = resp_text.split("[[まとめ]]", 1)[1].strip()
+        _review_dialogs.pop(cid, None)
+        if not diary:
+            diary = "\n".join(m["content"] for m in hist if m["role"] == "user")
+        await _finalize_review(message, diary)
+    else:
+        # まだ聞き取り中 → 質問を返して継続
+        hist.append({"role": "assistant", "content": resp_text})
+        _review_dialogs[cid] = hist[-16:]  # 履歴を制限
+        await message.reply(resp_text or "…もう少し聞かせてください。")
+
+
+async def dispatch_review(message: discord.Message):
+    """振り返りチャンネルの入力を、モード切替／番号選択／対話／通常に振り分ける。"""
+    text = message.content.strip()
+    cid = message.channel.id
+
+    # モード切替キーワード（継続。設定はシートに保存）
+    if text in ("対話", "対話モード", "ヒアリング", "対話形式"):
+        _set_review_style("dialog")
+        await message.reply(
+            "🗣️ 対話モードに切り替えました。次の振り返りから、こちらが質問しながら深掘りします。"
+            "（「通常」で戻せます）"
+        )
+        return
+    if text in ("通常", "通常モード", "シンプル", "これまで通り", "これまで同様"):
+        _set_review_style("simple")
+        await message.reply(
+            "📝 通常モードに切り替えました。送った文章をそのまま記録します。（「対話」で対話モードに）"
+        )
+        return
+
+    # 番号選択待ち（バックログの明日タスク選択）
+    if cid in pending_task_selections:
+        if _looks_like_selection(text):
+            await handle_task_selection(message)
+            return
+        pending_task_selections.pop(cid, None)  # 選択以外は新しい振り返りとして続行
+
+    # 対話進行中なら継続
+    if cid in _review_dialogs:
+        await continue_review_dialog(message)
+        return
+
+    # 新規：モードに応じて開始
+    if _review_style == "dialog":
+        await start_review_dialog(message)
+    else:
+        await handle_review(message)
+
+
+def _set_review_style(style: str) -> None:
+    global _review_style
+    _review_style = style
+    try:
+        sheets.set_setting("review_style", style)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("振り返りスタイルの保存に失敗: %s", e)
 
 
 async def handle_task_selection(message: discord.Message):
@@ -1322,6 +1460,11 @@ _profile_cache: str = ""
 _secretary_history: dict[int, list[dict]] = {}
 MAX_SECRETARY_TURNS = 10
 
+# 振り返りのスタイル："simple"（通常）/ "dialog"（対話ヒアリング）。設定シートに永続化。
+_review_style: str = "simple"
+# 進行中の対話（振り返りチャンネルID → 会話履歴）。メモリ保持。
+_review_dialogs: dict[int, list[dict]] = {}
+
 
 async def load_profile() -> None:
     """「プロフィール」チャンネルの最新メッセージ（BOT以外）を _profile_cache に読み込む。"""
@@ -1341,10 +1484,22 @@ async def load_profile() -> None:
         logger.exception("プロフィールの読み込みに失敗: %s", e)
 
 
+async def load_review_style() -> None:
+    """振り返りスタイルを設定シートから読み込む（再起動後も保持）。"""
+    global _review_style
+    try:
+        style = sheets.get_setting("review_style", "simple")
+        _review_style = "dialog" if style == "dialog" else "simple"
+        logger.info("振り返りスタイル: %s", _review_style)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("振り返りスタイルの読み込みに失敗: %s", e)
+
+
 @client.event
 async def on_ready():
     logger.info("ログインしました: %s (id=%s)", client.user, client.user.id)
     await load_profile()
+    await load_review_style()
     if not morning_post.is_running():
         morning_post.start()
     if not night_post.is_running():
@@ -1379,14 +1534,9 @@ async def on_message(message: discord.Message):
         return
 
     try:
-        # 振り返りチャンネル: 番号入力待ちでも、入力が「選択っぽい」ときだけ選択処理に回す。
-        # 普通の文章なら待ち状態を解除して通常の振り返りとして扱う（番号と誤認しない）。
-        if handler is handle_review and message.channel.id in pending_task_selections:
-            if _looks_like_selection(message.content):
-                await handle_task_selection(message)
-            else:
-                pending_task_selections.pop(message.channel.id, None)
-                await handle_review(message)
+        # 振り返りチャンネルはモード切替・番号選択・対話・通常を専用ディスパッチャで振り分ける
+        if handler is handle_review:
+            await dispatch_review(message)
         else:
             await handler(message)
     except Exception as e:  # noqa: BLE001

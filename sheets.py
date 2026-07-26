@@ -47,6 +47,8 @@ WS_MEAL = "食事"
 WS_COFFEE = "コーヒー"
 WS_FOCUS = "集中"
 WS_MOOD = "気分"
+# 設定（キー・値ストア）
+WS_SETTINGS = "設定"
 
 # ワークシート名 → ヘッダー行
 WORKSHEETS: dict[str, list[str]] = {
@@ -64,6 +66,7 @@ WORKSHEETS: dict[str, list[str]] = {
     WS_COFFEE: ["日付", "時刻", "空腹時"],
     WS_FOCUS: ["日付", "午前", "午後"],
     WS_MOOD: ["日付", "スコア", "メモ"],
+    WS_SETTINGS: ["設定", "値"],
 }
 
 # 「完了」とみなす値
@@ -552,6 +555,27 @@ def record_mood(score: int, note: str, when: Optional[datetime] = None) -> None:
     """気分スコア（1-10）と一言メモを記録する。"""
     if not _append(WS_MOOD, [_date(when), score, note]):
         logger.info("[STUB] 気分を記録: %s (%s)", score, note[:30])
+
+
+# ---------------------------------------------------------------------------
+# 設定（キー・値ストア）
+# ---------------------------------------------------------------------------
+def get_setting(key: str, default: str = "") -> str:
+    """設定シートから key の値を返す。無ければ default。"""
+    for r in _records(WS_SETTINGS):
+        if str(r.get("設定", "")).strip() == key:
+            return str(r.get("値", "")).strip() or default
+    return default
+
+
+def set_setting(key: str, value: str) -> None:
+    """設定シートに key=value を保存（既存キーは上書き）。"""
+    row = _find_row(WS_SETTINGS, 1, key)  # A列=設定
+    if row is None:
+        if not _append(WS_SETTINGS, [key, value]):
+            logger.info("[STUB] 設定を保存: %s=%s", key, value)
+    else:
+        _update_row(WS_SETTINGS, row, "B", [value])
 
 
 # ---------------------------------------------------------------------------
