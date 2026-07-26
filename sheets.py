@@ -39,6 +39,14 @@ WS_TASK = "タスク"
 WS_IDEA = "アイデア"
 WS_ARTICLE = "記事"
 WS_HABIT = "習慣"
+# 健康トラッカー
+WS_SLEEP = "睡眠"
+WS_STOOL = "便"
+WS_GUT = "腸"
+WS_MEAL = "食事"
+WS_COFFEE = "コーヒー"
+WS_FOCUS = "集中"
+WS_MOOD = "気分"
 
 # ワークシート名 → ヘッダー行
 WORKSHEETS: dict[str, list[str]] = {
@@ -49,6 +57,13 @@ WORKSHEETS: dict[str, list[str]] = {
     WS_IDEA: ["日付", "タイトル", "カテゴリ", "内容"],
     WS_ARTICLE: ["日付", "URL", "要約"],
     WS_HABIT: ["日付", "習慣"],
+    WS_SLEEP: ["日付", "就寝", "起床", "中途覚醒回数"],
+    WS_STOOL: ["日付", "ブリストル"],
+    WS_GUT: ["日付", "ガス", "膨満感", "腹痛"],
+    WS_MEAL: ["日付", "内容", "FODMAP"],
+    WS_COFFEE: ["日付", "時刻", "空腹時"],
+    WS_FOCUS: ["日付", "午前", "午後"],
+    WS_MOOD: ["日付", "スコア", "メモ"],
 }
 
 # 「完了」とみなす値
@@ -490,6 +505,53 @@ def get_habit_stats(start: date, end: date) -> dict[str, int]:
         if habit:
             stats[habit] = stats.get(habit, 0) + 1
     return stats
+
+
+# ---------------------------------------------------------------------------
+# 健康トラッカー
+# ---------------------------------------------------------------------------
+def record_sleep(bedtime: str, wake: str, awakenings: int,
+                 when: Optional[datetime] = None) -> None:
+    """就寝・起床時刻と中途覚醒回数を記録する。"""
+    if not _append(WS_SLEEP, [_date(when), bedtime, wake, awakenings]):
+        logger.info("[STUB] 睡眠を記録: %s→%s 覚醒%s", bedtime, wake, awakenings)
+
+
+def record_stool(bristol: int, when: Optional[datetime] = None) -> None:
+    """ブリストルスケール（1-7）を記録する。"""
+    if not _append(WS_STOOL, [_date(when), bristol]):
+        logger.info("[STUB] 便を記録: %s", bristol)
+
+
+def record_gut(gas: int, bloating: int, pain: int,
+               when: Optional[datetime] = None) -> None:
+    """ガス・膨満感・腹痛（各1-5）を記録する。"""
+    if not _append(WS_GUT, [_date(when), gas, bloating, pain]):
+        logger.info("[STUB] 腸を記録: ガス%s 膨満%s 腹痛%s", gas, bloating, pain)
+
+
+def record_meal(content: str, fodmap: str, when: Optional[datetime] = None) -> None:
+    """食事内容と FODMAP 高低フラグを記録する。"""
+    if not _append(WS_MEAL, [_date(when), content, fodmap]):
+        logger.info("[STUB] 食事を記録: %s (FODMAP=%s)", content[:30], fodmap)
+
+
+def record_coffee(time_str: str, fasting: str, when: Optional[datetime] = None) -> None:
+    """コーヒー摂取時刻と空腹時か否かを記録する。"""
+    if not _append(WS_COFFEE, [_date(when), time_str, fasting]):
+        logger.info("[STUB] コーヒーを記録: %s (%s)", time_str, fasting)
+
+
+def record_focus(am: int, pm: int, when: Optional[datetime] = None) -> None:
+    """午前・午後の集中力スコア（各1-5）を記録する。"""
+    if not _append(WS_FOCUS, [_date(when), am, pm]):
+        logger.info("[STUB] 集中を記録: 午前%s 午後%s", am, pm)
+
+
+def record_mood(score: int, note: str, when: Optional[datetime] = None) -> None:
+    """気分スコア（1-10）と一言メモを記録する。"""
+    if not _append(WS_MOOD, [_date(when), score, note]):
+        logger.info("[STUB] 気分を記録: %s (%s)", score, note[:30])
 
 
 # ---------------------------------------------------------------------------

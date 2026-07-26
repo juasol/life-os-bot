@@ -56,6 +56,14 @@ CH_ASSISTANT = os.environ.get("CHANNEL_ASSISTANT", "AI秘書")
 CH_REPORT = os.environ.get("CHANNEL_REPORT", "レポート")
 CH_PROFILE = os.environ.get("CHANNEL_PROFILE", "プロフィール")
 CH_HABIT = os.environ.get("CHANNEL_HABIT", "習慣")
+# 健康トラッカー
+CH_SLEEP = os.environ.get("CHANNEL_SLEEP", "睡眠")
+CH_STOOL = os.environ.get("CHANNEL_STOOL", "便")
+CH_GUT = os.environ.get("CHANNEL_GUT", "腸")
+CH_MEAL = os.environ.get("CHANNEL_MEAL", "食事")
+CH_COFFEE = os.environ.get("CHANNEL_COFFEE", "コーヒー")
+CH_FOCUS = os.environ.get("CHANNEL_FOCUS", "集中")
+CH_MOOD = os.environ.get("CHANNEL_MOOD", "気分")
 
 # BOT が自動で話しかけるチャンネル（ユーザー入力を処理する／しないは別途分岐）
 AUTO_POST_CHANNELS = {CH_WEIGHT, CH_TODO, CH_REVIEW}
@@ -950,6 +958,97 @@ async def handle_habit(message: discord.Message):
 
 
 # ---------------------------------------------------------------------------
+# 健康トラッカーのハンドラ
+# ---------------------------------------------------------------------------
+async def handle_mood(message: discord.Message):
+    # 例: "7 仕事が捗った" / "score:7 note:仕事が捗った"
+    text = message.content.strip()
+    m = re.search(r"\d+", text)
+    if not m:
+        await message.reply("1〜10のスコアを入れてください（例: 7 仕事が捗った）")
+        return
+    score = int(m.group())
+    if not 1 <= score <= 10:
+        await message.reply("スコアは1〜10で入れてください")
+        return
+    note = text[m.end():].strip().lstrip(":：").replace("note", "").strip(' 　"「」')
+    sheets.record_mood(score, note)
+    await message.reply(f"✅ 気分 {score}/10 を記録しました！" + (f"（{note}）" if note else ""))
+
+
+async def handle_stool(message: discord.Message):
+    m = re.search(r"[1-7]", message.content)
+    if not m:
+        await message.reply("ブリストルスケール 1〜7 の数値を送ってください")
+        return
+    sheets.record_stool(int(m.group()))
+    await message.reply(f"✅ ブリストル {m.group()} を記録しました！")
+
+
+async def handle_gut(message: discord.Message):
+    # 例: "3 4 2"（ガス 膨満感 腹痛、各1-5）
+    nums = re.findall(r"[1-5]", message.content)
+    if len(nums) < 3:
+        await message.reply("ガス・膨満感・腹痛を各1〜5で送ってください（例: 3 4 2）")
+        return
+    gas, bloating, pain = (int(n) for n in nums[:3])
+    sheets.record_gut(gas, bloating, pain)
+    await message.reply(f"✅ 腸: ガス{gas}/膨満{bloating}/腹痛{pain} を記録しました！")
+
+
+async def handle_focus(message: discord.Message):
+    # 例: "3 4"（午前 午後、各1-5）
+    nums = re.findall(r"[1-5]", message.content)
+    if len(nums) < 2:
+        await message.reply("午前・午後の集中力を各1〜5で送ってください（例: 3 4）")
+        return
+    am, pm = int(nums[0]), int(nums[1])
+    sheets.record_focus(am, pm)
+    await message.reply(f"✅ 集中: 午前{am}/午後{pm} を記録しました！")
+
+
+async def handle_sleep(message: discord.Message):
+    # 例: "23:30 7:00 2"（就寝 起床 中途覚醒回数）
+    times = re.findall(r"\d{1,2}:\d{2}", message.content)
+    if len(times) < 2:
+        await message.reply("就寝・起床時刻を送ってください（例: 23:30 7:00 2）")
+        return
+    rest = re.sub(r"\d{1,2}:\d{2}", "", message.content)
+    awak = re.findall(r"\d+", rest)
+    awakenings = int(awak[0]) if awak else 0
+    sheets.record_sleep(times[0], times[1], awakenings)
+    await message.reply(
+        f"✅ 睡眠 {times[0]}→{times[1]}（中途覚醒{awakenings}回）を記録しました！"
+    )
+
+
+async def handle_coffee(message: discord.Message):
+    # 例: "9:00 空腹"
+    text = message.content.strip()
+    tm = re.search(r"\d{1,2}:\d{2}", text)
+    time_str = tm.group() if tm else datetime.now(JST).strftime("%H:%M")
+    fasting = "空腹時" if ("空腹" in text or "空きっ腹" in text) else "非空腹時"
+    sheets.record_coffee(time_str, fasting)
+    await message.reply(f"✅ コーヒー {time_str}（{fasting}）を記録しました！")
+
+
+async def handle_meal(message: discord.Message):
+    # 食事内容 → Claude で FODMAP 高/低 を判定
+    text = message.content.strip()
+    if not text:
+        return
+    result = await claude_text(
+        "次の食事内容が低FODMAP・高FODMAPのどちらに近いか判定し、"
+        "『高』か『低』の1文字だけ返してください。\n\n"
+        f"食事: {text}",
+        max_tokens=10,
+    )
+    fodmap = "高" if "高" in result else "低"
+    sheets.record_meal(text, fodmap)
+    await message.reply(f"✅ 食事を記録しました！（FODMAP: {fodmap}）")
+
+
+# ---------------------------------------------------------------------------
 # プロフィール注入用ヘルパー
 # ---------------------------------------------------------------------------
 def _profile_prefix(profile: str) -> str:
@@ -1174,6 +1273,13 @@ HANDLERS = {
         CH_ASSISTANT: handle_secretary,
         CH_PROFILE: handle_profile,
         CH_HABIT: handle_habit,
+        CH_SLEEP: handle_sleep,
+        CH_STOOL: handle_stool,
+        CH_GUT: handle_gut,
+        CH_MEAL: handle_meal,
+        CH_COFFEE: handle_coffee,
+        CH_FOCUS: handle_focus,
+        CH_MOOD: handle_mood,
         # CH_TODO はユーザー入力不要なのでハンドラなし
     }.items()
 }
