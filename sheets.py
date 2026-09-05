@@ -558,6 +558,109 @@ def record_mood(score: int, note: str, when: Optional[datetime] = None) -> None:
 
 
 # ---------------------------------------------------------------------------
+# 体調ログ集計（週次・月次レポート用）
+# ---------------------------------------------------------------------------
+def _to_float(x) -> Optional[float]:
+    try:
+        return float(str(x).replace(",", "").strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _avg(values: list) -> Optional[float]:
+    """None を除いた平均を小数第1位で返す。空なら None。"""
+    vals = [v for v in values if v is not None]
+    return round(sum(vals) / len(vals), 1) if vals else None
+
+
+def _parse_hm(s) -> Optional[int]:
+    """時刻文字列（"23:30" 等）を「0時からの分数」に変換する。失敗時 None。"""
+    s = str(s).strip().replace("：", ":")
+    for fmt in ("%H:%M", "%H%M"):
+        try:
+            t = datetime.strptime(s, fmt)
+            return t.hour * 60 + t.minute
+        except ValueError:
+            continue
+    return None
+
+
+def _sleep_minutes(bedtime, wake) -> Optional[int]:
+    """就寝→起床の睡眠時間（分）。日をまたぐ場合も考慮。失敗時 None。"""
+    b, w = _parse_hm(bedtime), _parse_hm(wake)
+    if b is None or w is None:
+        return None
+    diff = w - b
+    if diff <= 0:
+        diff += 24 * 60  # 日付をまたいだ
+    return diff
+
+
+def get_health_stats(start: date, end: date) -> dict:
+    """体調ログ7種（睡眠/便/腸/食事/コーヒー/集中/気分）を期間集計して返す。
+
+    各トラッカーごとに days（記録日数）や平均値をまとめた dict を返す。
+    記録が無いトラッカーは days=0 / count=0。
+    """
+    stats: dict = {}
+
+    # 睡眠: 就寝(B)/起床(C)/中途覚醒回数(D)
+    sleep_rows = _rows_by_period(WS_SLEEP, start, end)
+    durations = [_sleep_minutes(r[1] if len(r) > 1 else "",
+                                r[2] if len(r) > 2 else "") for r in sleep_rows]
+    awakenings = [_to_float(r[3]) for r in sleep_rows if len(r) > 3]
+    stats["sleep"] = {
+        "days": len(sleep_rows),
+        "avg_minutes": _avg(durations),
+        "avg_awakenings": _avg(awakenings),
+    }
+
+    # 便: ブリストル(B) 1-7
+    stool_rows = _rows_by_period(WS_STOOL, start, end)
+    stats["stool"] = {
+        "days": len(stool_rows),
+        "avg_bristol": _avg([_to_float(r[1]) for r in stool_rows if len(r) > 1]),
+    }
+
+    # 腸: ガス(B)/膨満感(C)/腹痛(D) 各1-5
+    gut_rows = _rows_by_period(WS_GUT, start, end)
+    stats["gut"] = {
+        "days": len(gut_rows),
+        "avg_gas": _avg([_to_float(r[1]) for r in gut_rows if len(r) > 1]),
+        "avg_bloating": _avg([_to_float(r[2]) for r in gut_rows if len(r) > 2]),
+        "avg_pain": _avg([_to_float(r[3]) for r in gut_rows if len(r) > 3]),
+    }
+
+    # 食事: 内容(B)/FODMAP(C) "高"/"低"
+    meal_rows = _rows_by_period(WS_MEAL, start, end)
+    high_fodmap = sum(1 for r in meal_rows if len(r) > 2 and "高" in str(r[2]))
+    stats["meal"] = {"count": len(meal_rows), "high_fodmap": high_fodmap}
+
+    # コーヒー: 時刻(B)/空腹時(C) "空腹時"/"非空腹時"
+    coffee_rows = _rows_by_period(WS_COFFEE, start, end)
+    fasting = sum(1 for r in coffee_rows
+                  if len(r) > 2 and "空腹" in str(r[2]) and "非空腹" not in str(r[2]))
+    stats["coffee"] = {"count": len(coffee_rows), "fasting": fasting}
+
+    # 集中: 午前(B)/午後(C) 各1-5
+    focus_rows = _rows_by_period(WS_FOCUS, start, end)
+    stats["focus"] = {
+        "days": len(focus_rows),
+        "avg_am": _avg([_to_float(r[1]) for r in focus_rows if len(r) > 1]),
+        "avg_pm": _avg([_to_float(r[2]) for r in focus_rows if len(r) > 2]),
+    }
+
+    # 気分: スコア(B) 1-10
+    mood_rows = _rows_by_period(WS_MOOD, start, end)
+    stats["mood"] = {
+        "days": len(mood_rows),
+        "avg_score": _avg([_to_float(r[1]) for r in mood_rows if len(r) > 1]),
+    }
+
+    return stats
+
+
+# ---------------------------------------------------------------------------
 # 設定（キー・値ストア）
 # ---------------------------------------------------------------------------
 def get_setting(key: str, default: str = "") -> str:

@@ -1,5 +1,7 @@
 # 機密情報（絶対にコミットしない）
 .env
+.env.*
+!.env.example
 credentials.json
 
 # ログ

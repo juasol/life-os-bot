@@ -275,6 +275,9 @@ async def monthly_report_post():
     _fired_today.add(key)
     logger.info("月末レポートを実行: %d年%d月", now.year, now.month)
     await send_monthly_report(now.year, now.month)
+    # 体調ログの月次レポートも同時に送る
+    start, end = sheets._month_range(now.year, now.month)
+    await send_health_report(start, end, f"{now.year}年{now.month}月")
 
 
 @tasks.loop(time=time(hour=21, minute=0, tzinfo=JST))
@@ -295,10 +298,26 @@ async def weekly_habit_report_post():
         await ch.send(report)
 
 
+@tasks.loop(time=time(hour=21, minute=0, tzinfo=JST))
+async def weekly_health_report_post():
+    # 毎日21時に起動し、日曜日のときだけ直近7日間の体調レポートを送る
+    now = datetime.now(JST)
+    if now.weekday() != 6:  # 0=月 ... 6=日
+        return
+    key = f"health-{now.strftime('%Y-%m-%d')}"
+    if key in _fired_today:
+        return
+    _fired_today.add(key)
+    logger.info("週次の体調レポートを実行")
+    start = (now - timedelta(days=6)).date()  # 今日を含む直近7日間
+    await send_health_report(start, now.date(), "直近7日間")
+
+
 @morning_post.before_loop
 @night_post.before_loop
 @monthly_report_post.before_loop
 @weekly_habit_report_post.before_loop
+@weekly_health_report_post.before_loop
 async def _before_scheduled():
     await client.wait_until_ready()
 
@@ -1368,6 +1387,90 @@ async def generate_habit_report(stats: dict[str, int], period: str, days: int) -
     return f"📊 習慣レポート（{period}）\n\n{body}\n\n{comment}"
 
 
+def _fmt_minutes(m) -> str:
+    """分数を「X時間Y分」に整形。None は「記録なし」。"""
+    if m is None:
+        return "記録なし"
+    h, mm = divmod(int(round(m)), 60)
+    return f"{h}時間{mm:02d}分"
+
+
+def _num(x) -> str:
+    """平均値の表示。None は「—」。"""
+    return "—" if x is None else str(x)
+
+
+def _build_health_lines(stats: dict) -> list[str]:
+    """体調ログ集計 dict から、各トラッカー1行の要約リストを組み立てる。
+
+    記録が無いトラッカーは行を作らない（＝全て空なら空リスト）。
+    """
+    lines: list[str] = []
+
+    s = stats.get("sleep") or {}
+    if s.get("days"):
+        parts = [f"平均睡眠 {_fmt_minutes(s.get('avg_minutes'))}"]
+        if s.get("avg_awakenings") is not None:
+            parts.append(f"中途覚醒 平均{s['avg_awakenings']}回")
+        lines.append(f"😴 睡眠：{' ／ '.join(parts)}（{s['days']}日）")
+
+    st = stats.get("stool") or {}
+    if st.get("days"):
+        avg = st.get("avg_bristol")
+        detail = f"平均ブリストル {avg}" if avg is not None else "記録あり"
+        lines.append(f"💩 便通：{detail}（{st['days']}日）")
+
+    g = stats.get("gut") or {}
+    if g.get("days"):
+        lines.append(
+            f"🌀 腸：ガス{_num(g.get('avg_gas'))} ／ 膨満{_num(g.get('avg_bloating'))} "
+            f"／ 腹痛{_num(g.get('avg_pain'))}（5段階平均・{g['days']}日）"
+        )
+
+    m = stats.get("meal") or {}
+    if m.get("count"):
+        lines.append(f"🍽️ 食事：{m['count']}件（うち高FODMAP {m.get('high_fodmap', 0)}件）")
+
+    c = stats.get("coffee") or {}
+    if c.get("count"):
+        lines.append(f"☕ コーヒー：{c['count']}杯（うち空腹時 {c.get('fasting', 0)}杯）")
+
+    f = stats.get("focus") or {}
+    if f.get("days"):
+        lines.append(
+            f"🎯 集中：午前{_num(f.get('avg_am'))} ／ 午後{_num(f.get('avg_pm'))}"
+            f"（5段階平均・{f['days']}日）"
+        )
+
+    mo = stats.get("mood") or {}
+    if mo.get("days"):
+        lines.append(f"🙂 気分：平均{_num(mo.get('avg_score'))}/10（{mo['days']}日）")
+
+    return lines
+
+
+async def generate_health_report(stats: dict, period: str, profile: str = "") -> str:
+    """体調ログ集計からレポート文を生成する。記録が無ければ定型文を返す。"""
+    lines = _build_health_lines(stats)
+    if not lines:
+        return f"🩺 体調レポート（{period}）\n\n記録はまだありません。"
+    body = "\n".join(lines)
+
+    if claude is None:
+        return f"🩺 体調レポート（{period}）\n\n{body}"
+
+    comment = await claude_text(
+        _profile_prefix(profile)
+        + "次は個人の体調ログ（睡眠・便通・腸の調子・食事・カフェイン・集中・気分）の"
+        f"集計（{period}）です。数値から読み取れる傾向・気になる点・"
+        "生活改善のヒントを、親しみやすいトーンで3〜4行の日本語にまとめてください。"
+        "前置きや見出しは不要。断定的な医療診断は避けてください。\n\n" + body,
+        max_tokens=512,
+        model=MODEL_SMART,
+    )
+    return f"🩺 体調レポート（{period}）\n\n{body}\n\n{comment}"
+
+
 def _split_message(text: str, limit: int = 1900) -> list[str]:
     """Discord の文字数制限を超えないよう、text を limit 字ずつに分割する。"""
     chunks = []
@@ -1404,6 +1507,15 @@ async def send_monthly_report(year: int, month: int) -> None:
     report = await generate_monthly_report(current, prev, year, month, profile=_profile_cache)
     for ch in find_channels_by_name(CH_REPORT):
         await ch.send(report)
+
+
+async def send_health_report(start: date, end: date, period: str) -> None:
+    """体調ログを期間集計し、レポートを生成して CHANNEL_REPORT に送信する。"""
+    stats = sheets.get_health_stats(start, end)
+    report = await generate_health_report(stats, period, profile=_profile_cache)
+    for ch in find_channels_by_name(CH_REPORT):
+        for chunk in _split_message(report):
+            await ch.send(chunk)
 
 
 # チャンネル名（小文字に正規化）→ ハンドラ
@@ -1508,6 +1620,8 @@ async def on_ready():
         monthly_report_post.start()
     if not weekly_habit_report_post.is_running():
         weekly_habit_report_post.start()
+    if not weekly_health_report_post.is_running():
+        weekly_health_report_post.start()
 
 
 def _looks_like_selection(text: str) -> bool:
