@@ -1518,6 +1518,36 @@ async def send_health_report(start: date, end: date, period: str) -> None:
             await ch.send(chunk)
 
 
+async def handle_report(message: discord.Message):
+    """「レポート」チャンネルでキーワードに応じて体調レポートを即時生成する。
+
+    定期送信（日曜21時／月末21時）を待たずに、その場で確認できる。
+      体調 / 週次        → 直近7日間
+      月次 / 今月         → 今月（1日〜今日の途中経過）
+      先月               → 先月（1ヶ月分）
+    """
+    text = message.content.strip()
+    today = datetime.now(JST).date()
+
+    if "先月" in text:
+        py, pm = (today.year - 1, 12) if today.month == 1 else (today.year, today.month - 1)
+        start, end = sheets._month_range(py, pm)
+        await message.reply(f"🩺 先月（{py}年{pm}月）の体調レポートを作成します…少々お待ちください")
+        await send_health_report(start, end, f"{py}年{pm}月")
+        return
+
+    if any(k in text for k in ("月次", "今月", "月間")):
+        start, _ = sheets._month_range(today.year, today.month)
+        await message.reply(f"🩺 今月（{today.year}年{today.month}月）の体調レポートを作成します…少々お待ちください")
+        await send_health_report(start, today, f"{today.year}年{today.month}月（途中経過）")
+        return
+
+    # 既定: 週次（直近7日間）
+    start = today - timedelta(days=6)
+    await message.reply("🩺 直近7日間の体調レポートを作成します…少々お待ちください")
+    await send_health_report(start, today, "直近7日間")
+
+
 # チャンネル名（小文字に正規化）→ ハンドラ
 # Discord がラテン文字を小文字化するため、キーも小文字で持つ。
 HANDLERS = {
@@ -1529,6 +1559,7 @@ HANDLERS = {
         CH_IDEA: handle_idea,
         CH_ARTICLE: handle_article,
         CH_ASSISTANT: handle_secretary,
+        CH_REPORT: handle_report,
         CH_PROFILE: handle_profile,
         CH_HABIT: handle_habit,
         CH_SLEEP: handle_sleep,
