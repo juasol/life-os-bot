@@ -1,11 +1,16 @@
 @echo off
-chcp 65001 >nul
 cd /d "%~dp0"
-echo === life-os-bot を起動します ===
-echo 停止するには Ctrl+C を押してください。
+echo === Starting life-os-bot ===
+echo Press Ctrl+C to stop.
 echo.
 set PYTHONUTF8=1
-".venv\Scripts\python.exe" main.py
+
+if exist ".venv\Scripts\python.exe" (
+    ".venv\Scripts\python.exe" main.py
+) else (
+    python main.py
+)
+
 echo.
-echo === BOT が終了しました ===
+echo === Bot stopped ===
 pause
