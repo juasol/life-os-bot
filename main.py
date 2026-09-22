@@ -1000,8 +1000,21 @@ async def answer_secretary_question(question: str, image_bytes: bytes | None = N
     if claude is None:
         return "（ANTHROPIC_API_KEY が未設定のため回答できません）"
 
-    # プロフィールがあればシステムプロンプト冒頭に注入
-    system_prompt = _profile_prefix(profile) + SECRETARY_SYSTEM
+    # 現在日時（日本時間）をシステムプロンプトに注入する。
+    # datetime.now(JST) は環境のTZ設定に関係なく必ずJSTを返すので確実。
+    # これが無いと「今日」を推測で解釈し、前日などの記録を持ち出してしまう。
+    now = datetime.now(JST)
+    weekday_ja = "月火水木金土日"[now.weekday()]
+    date_line = (
+        f"【現在日時】{now.strftime('%Y年%m月%d日')}（{weekday_ja}）"
+        f"{now.strftime('%H:%M')} 日本時間（JST）です。\n"
+        "ユーザーは日本在住です。「今日」「昨日」「今」などの時間表現はすべて"
+        "この日本時間を基準に解釈してください。スプレッドシートの日付（YYYY-MM-DD）も"
+        "すべて日本時間として扱ってください。\n\n"
+    )
+
+    # プロフィール＋現在日時をシステムプロンプト冒頭に注入
+    system_prompt = _profile_prefix(profile) + date_line + SECRETARY_SYSTEM
 
     # コンテキストデータ（各シートのダンプ＋アイデア一覧）
     context = sheets.dump_for_assistant()
