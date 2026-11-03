@@ -52,7 +52,7 @@ WS_SETTINGS = "設定"
 
 # ワークシート名 → ヘッダー行
 WORKSHEETS: dict[str, list[str]] = {
-    WS_EXPENSE: ["日付", "金額（円）", "ジャンル", "備考"],
+    WS_EXPENSE: ["日付", "金額（円）", "ジャンル", "備考", "負担者"],
     WS_WEIGHT: ["日付", "体重kg"],
     WS_DIARY: ["日付", "本文"],
     WS_TASK: ["日付", "内容", "完了", "実行予定日"],
@@ -170,13 +170,15 @@ def _ws(name: str):
             logger.info("ワークシートを新規作成: %s", name)
             return ws
 
-        # 既存シート: ヘッダーが消えていれば補う（1プロセス1回）
+        # 既存シート: ヘッダーが消えている／期待する列構成と先頭が食い違う場合は書き直す
+        # （列追加にも対応。例: 家計簿に「負担者」列を後から足す）。1プロセス1回だけ確認。
         if header and name not in _verified:
             first = ws.row_values(1)
-            if not any(str(c).strip() for c in first):
+            current = [str(c).strip() for c in first]
+            if current[:len(header)] != header:
                 ws.update(values=[header], range_name="A1",
                           value_input_option="USER_ENTERED")
-                logger.info("ワークシートのヘッダーを修復: %s", name)
+                logger.info("ワークシートのヘッダーを更新: %s", name)
             _verified.add(name)
         return ws
     except Exception as e:  # noqa: BLE001
@@ -283,9 +285,10 @@ def _rows_by_period(sheet_name: str, start: date, end: date) -> list[list]:
 # 家計簿シート
 # ---------------------------------------------------------------------------
 def add_expense(amount: int, genre: str = "", note: str = "",
-                when: Optional[datetime] = None) -> None:
-    if not _append(WS_EXPENSE, [_date(when), amount, genre, note]):
-        logger.info("[STUB] 家計簿を記録: %d円 / %s / %s", amount, genre, note)
+                payer: str = "自分", when: Optional[datetime] = None) -> None:
+    """支出を家計簿に追加する。payer は負担者（"自分" / "家"）。"""
+    if not _append(WS_EXPENSE, [_date(when), amount, genre, note, payer]):
+        logger.info("[STUB] 家計簿を記録: %d円 / %s / %s / %s", amount, genre, note, payer)
 
 
 def find_expense_row(date: str, description: str) -> Optional[int]:
@@ -711,6 +714,23 @@ def get_monthly_expense_total(year: int, month: int) -> int:
         except (IndexError, ValueError):
             continue
     return total
+
+
+def get_monthly_expense_by_payer(year: int, month: int) -> dict[str, int]:
+    """指定月の支出を負担者（E列）ごとに集計して返す。
+
+    例: {"自分": 42000, "家": 18000}。負担者が空欄の旧データは「自分」に寄せる。
+    """
+    start, end = _month_range(year, month)
+    result: dict[str, int] = {}
+    for row in _rows_by_period(WS_EXPENSE, start, end):
+        try:
+            amount = int(str(row[1]).replace(",", "").strip())
+        except (IndexError, ValueError):
+            continue
+        payer = (row[4].strip() if len(row) > 4 and row[4].strip() else "自分")
+        result[payer] = result.get(payer, 0) + amount
+    return result
 
 
 def get_monthly_count(sheet_name: str, year: int, month: int) -> int:

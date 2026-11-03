@@ -660,48 +660,55 @@ async def handle_money(message: discord.Message):
     images = [a for a in message.attachments
               if (a.content_type or "").startswith("image/")]
 
+    text = message.content.strip()
+
     instruction = (
-        "支出の情報から『金額（整数の円）』『ジャンル』『備考』を抽出してください。"
+        "支出の情報から『金額（整数の円）』『ジャンル』『備考』『負担者』を抽出してください。"
         "ジャンルは 食費 / 日用品 / 交通費 / 交際費 / 娯楽 / 医療 / 衣服 / 住居 / 通信 / その他 "
         "から最も近いものを1つ選んでください。備考は店名や品目など簡潔に。"
-        "必ず次の形式の1行だけで返してください: 金額|ジャンル|備考  "
-        "例: 1200|食費|ランチ  読み取れない場合は: 0|その他|不明"
+        "負担者は、家計・家族共用・世帯の支出（家賃/光熱費/日用品のまとめ買い/家族の外食 など、"
+        "または文中に『家』『家用』『家族』『共用』等がある）なら『家』、"
+        "それ以外（本人個人の支出）やどちらとも判断できない場合は『自分』としてください。"
+        "必ず次の形式の1行だけで返してください: 金額|ジャンル|備考|負担者  "
+        "例: 1200|食費|ランチ|自分  例: 8000|住居|電気代|家  読み取れない場合は: 0|その他|不明|自分"
     )
 
     if images:
         data, media_type = await download_attachment(images[0])
+        hint = f"\n\nユーザーのメモ（負担者の判断に使う）: {text}" if text else ""
         result = await claude_vision(
             data, media_type,
-            "この画像はレシートまたは支払いのスクリーンショットです。" + instruction,
+            "この画像はレシートまたは支払いのスクリーンショットです。" + instruction + hint,
         )
     else:
-        text = message.content.strip()
         if not text:
             await message.reply("支出の内容（テキストまたは画像）を送ってください")
             return
         result = await claude_text(f"次の支出メモから情報を抽出してください。{instruction}\n\n{text}")
 
-    amount, genre, note = _parse_expense(result)
+    amount, genre, note, payer = _parse_expense(result)
     if amount is None:
         await message.reply(f"金額を読み取れませんでした（解析結果: {result}）")
         return
-    sheets.add_expense(amount, genre, note)
+    sheets.add_expense(amount, genre, note, payer=payer)
     detail = " / ".join(x for x in (genre, note) if x)
-    await message.reply(f"記録しました（{amount:,}円 / {detail}）")
+    await message.reply(f"記録しました（[{payer}] {amount:,}円 / {detail}）")
 
 
-def _parse_expense(result: str) -> tuple[int | None, str, str]:
+def _parse_expense(result: str) -> tuple[int | None, str, str, str]:
     line = (result or "").strip().splitlines()[0] if result.strip() else ""
     if "|" not in line:
-        return None, "", ""
+        return None, "", "", "自分"
     fields = [f.strip() for f in line.split("|")]
     amount_str = fields[0] if len(fields) > 0 else ""
     genre = fields[1] if len(fields) > 1 else ""
     note = fields[2] if len(fields) > 2 else ""
+    payer = fields[3] if len(fields) > 3 else ""
+    payer = "家" if payer == "家" else "自分"  # 想定外の値は自分に寄せる
     digits = re.sub(r"[^\d]", "", amount_str)
     if not digits or int(digits) == 0:
-        return None, genre, note
-    return int(digits), genre or "その他", note or "不明"
+        return None, genre, note, payer
+    return int(digits), genre or "その他", note or "不明", payer
 
 
 async def handle_idea(message: discord.Message):
@@ -797,6 +804,7 @@ SECRETARY_TOOLS = [
                 "amount": {"type": "integer", "description": "金額（円）"},
                 "category": {"type": "string", "description": "ジャンル（食費/日用品/交通費/交際費/娯楽/医療/衣服/住居/通信/その他 など）"},
                 "description": {"type": "string", "description": "備考（店名や品目）"},
+                "payer": {"type": "string", "enum": ["自分", "家"], "description": "負担者。家計・家族共用の支出なら『家』、本人個人の支出なら『自分』（省略時は自分）"},
                 "date": {"type": "string", "description": "日付 YYYY-MM-DD（省略時は今日）"},
             },
             "required": ["amount", "category", "description"],
@@ -936,9 +944,10 @@ def _run_secretary_tool(name: str, inp: dict) -> str:
                     when = datetime.strptime(inp["date"], "%Y-%m-%d")
                 except ValueError:
                     when = None
+            payer = "家" if inp.get("payer") == "家" else "自分"
             sheets.add_expense(int(inp["amount"]), inp.get("category", ""),
-                               inp.get("description", ""), when=when)
-            return "支出を記録しました。"
+                               inp.get("description", ""), payer=payer, when=when)
+            return f"支出を記録しました（負担者: {payer}）。"
 
         if name == "update_expense":
             row = sheets.find_expense_row(inp["date"], inp["current_description"])
@@ -1248,6 +1257,11 @@ async def generate_monthly_report(current: dict, prev: dict, year: int, month: i
         f"・支出：{current['expense']:,}円"
         f"（前月比 {current['expense'] - prev['expense']:+,}円）"
     )
+    # 負担者ごとの内訳（キーが無い旧データ互換のため .get で参照）
+    self_exp = current.get("expense_self", 0)
+    home_exp = current.get("expense_home", 0)
+    if self_exp or home_exp:
+        lines.append(f"　└ 自分：{self_exp:,}円 ／ 家：{home_exp:,}円")
 
     fw, lw = current["first_weight"], current["last_weight"]
     if fw is not None and lw is not None:
@@ -1501,8 +1515,11 @@ def _split_message(text: str, limit: int = 1900) -> list[str]:
 def _collect_month_stats(year: int, month: int) -> dict:
     """月末レポート用に、指定月の各種集計を dict で返す。"""
     first_w, last_w = sheets.get_monthly_weight_change(year, month)
+    by_payer = sheets.get_monthly_expense_by_payer(year, month)
     return {
         "expense": sheets.get_monthly_expense_total(year, month),
+        "expense_self": by_payer.get("自分", 0),
+        "expense_home": by_payer.get("家", 0),
         "ideas": sheets.get_monthly_count(sheets.WS_IDEA, year, month),
         "articles": sheets.get_monthly_count(sheets.WS_ARTICLE, year, month),
         "tasks_done": sheets.get_completed_tasks_monthly(year, month),
